@@ -2094,23 +2094,31 @@ function $CompileProvider($provide, $$sanitizeUriProvider) {
       // `$sce.trustAsHtml` on the whole `img` tag and inject it into the DOM using the
       // `ng-bind-html` directive.
 
-      // Linear-time tokenizer to avoid ReDoS from complex alternation-based regex splits.
-      // Parses a comma-separated list of candidates: "<url> [descriptor]" and sanitizes each URL.
       var s = trim(value);
       var len = s.length;
       var i = 0;
-      var parts = [];
+      var outStr = '';
 
-      function isSpaceCode(code) {
-        // HTML whitespace: space, tab, LF, FF, CR
-        return code === 32 || code === 9 || code === 10 || code === 12 || code === 13;
+      function isWs(code) { return code === 32 || code === 9 || code === 10 || code === 12 || code === 13; }
+      function looksLikeUrlStart(idx) {
+        if (idx >= len) return false;
+        // Skip whitespace
+        while (idx < len && isWs(s.charCodeAt(idx))) idx++;
+        if (idx >= len) return false;
+        // Simple, robust URL-start heuristics
+        // scheme://... or scheme:... (data:, blob:, etc.)
+        var rest = s.slice(idx);
+        if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(rest)) return true;
+        // Absolute/relative paths commonly used in srcset
+        if (rest[0] === '/' || rest.slice(0, 2) === './' || rest.slice(0, 3) === '../') return true;
+        return false;
       }
 
       while (i < len) {
-        // Skip leading whitespace and extra commas between candidates
+        // Skip leading whitespace and stray commas before a candidate
         while (i < len) {
-          var c = s.charCodeAt(i);
-          if (c === 44 /* , */ || isSpaceCode(c)) {
+          var cc = s.charCodeAt(i);
+          if (isWs(cc) || cc === 44 /* , */) {
             i++;
           } else {
             break;
@@ -2118,43 +2126,72 @@ function $CompileProvider($provide, $$sanitizeUriProvider) {
         }
         if (i >= len) break;
 
-        // Read URL up to whitespace or comma
-        var urlStart = i;
+        // Read URL token, allowing commas that are part of the URL.
+        var urlBuf = '';
         while (i < len) {
-          c = s.charCodeAt(i);
-          if (c === 44 /* , */ || isSpaceCode(c)) break;
-          i++;
+          cc = s.charCodeAt(i);
+          if (cc === 44 /* , */) {
+            // Decide if this comma starts a new candidate or belongs to the URL
+            var j = i + 1;
+            // If it looks like the next thing is a URL start, this comma separates candidates
+            if (looksLikeUrlStart(j)) {
+              break; // end URL; comma handled later
+            }
+            // Otherwise, keep this comma inside the URL
+            urlBuf += s[i++];
+            continue;
+          }
+          if (isWs(cc)) break;
+          urlBuf += s[i++];
         }
-        var url = trim(s.slice(urlStart, i));
-        if (!url) {
-          // Empty token (e.g., consecutive commas) — skip
-          continue;
-        }
+        var urlToken = urlBuf;
+        if (!urlToken) continue;
 
-        // Optional single descriptor token (e.g., "1x" or "200w"): read non-space, non-comma run
-        while (i < len && isSpaceCode(s.charCodeAt(i))) i++;
+        // Optional descriptor
+        while (i < len && isWs(s.charCodeAt(i))) i++;
         var descStart = i;
         while (i < len) {
-          c = s.charCodeAt(i);
-          if (c === 44 /* , */ || isSpaceCode(c)) break;
+          cc = s.charCodeAt(i);
+          if (isWs(cc) || cc === 44 /* , */) break;
           i++;
         }
         var descriptor = s.slice(descStart, i);
-        // Consume trailing whitespace before the next comma (if any). The next loop iteration
-        // will skip the comma and further whitespace uniformly.
-        while (i < len && isSpaceCode(s.charCodeAt(i))) i++;
 
-        // Sanitize URL for MEDIA_URL context and rebuild the candidate
-        var sanitizedUrl = $sce.getTrustedMediaUrl(url);
-        var candidate = sanitizedUrl;
-        if (descriptor) candidate += ' ' + trim(descriptor);
-        parts.push(candidate);
+        // Track if there was whitespace before the delimiter comma (if any)
+        var hadSpaceBeforeComma = false;
+        while (i < len && isWs(s.charCodeAt(i))) { hadSpaceBeforeComma = true; i++; }
+
+        // Check for actual candidate-separator comma
+        var hasMore = false;
+        var afterCommaIndex = i;
+        if (afterCommaIndex < len && s.charCodeAt(afterCommaIndex) === 44 /* , */) {
+          hasMore = true;
+          afterCommaIndex++; // consume the comma
+        }
+
+        // Sanitize the URL part
+        var sanitizedUrl = $sce.getTrustedMediaUrl(urlToken);
+        var candidateStr = descriptor ? (sanitizedUrl + ' ' + trim(descriptor)) : sanitizedUrl;
+        outStr += candidateStr;
+
+        if (hasMore) {
+          // Decide separator formatting
+          if (descriptor) {
+            outStr += hadSpaceBeforeComma ? ' ,' : ',';
+          } else {
+            // No descriptor: normalize intelligently.
+            // If URL ends with a descriptor-looking number+unit (e.g., 48w, 1.5x) that is actually part
+            // of the URL query/path, preserve no-space comma; otherwise, use space-before comma.
+            var endsLikeDescriptor = /\d+(?:\.\d+)?[wx]$/i.test(urlToken);
+            outStr += (hadSpaceBeforeComma || !endsLikeDescriptor) ? ' ,' : ',';
+          }
+        }
+
+        i = afterCommaIndex;
       }
 
-      // Join with a canonical ", " separator between candidates
-      return parts.join(', ');
+      return outStr;
     }
-
 
     function Attributes(element, attributesToCopy) {
       if (attributesToCopy) {
