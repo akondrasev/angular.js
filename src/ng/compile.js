@@ -2094,38 +2094,65 @@ function $CompileProvider($provide, $$sanitizeUriProvider) {
       // `$sce.trustAsHtml` on the whole `img` tag and inject it into the DOM using the
       // `ng-bind-html` directive.
 
-      var result = '';
+      // Linear-time tokenizer to avoid ReDoS from complex alternation-based regex splits.
+      // Parses a comma-separated list of candidates: "<url> [descriptor]" and sanitizes each URL.
+      var s = trim(value);
+      var len = s.length;
+      var i = 0;
+      var parts = [];
 
-      // first check if there are spaces because it's not the same pattern
-      var trimmedSrcset = trim(value);
-      //                (   999x   ,|   999w   ,|   ,|,   )
-      var srcPattern = /(\s+\d+x\s*,|\s+\d+w\s*,|\s+,|,\s+)/;
-      var pattern = /\s/.test(trimmedSrcset) ? srcPattern : /(,)/;
-
-      // split srcset into tuple of uri and descriptor except for the last item
-      var rawUris = trimmedSrcset.split(pattern);
-
-      // for each tuples
-      var nbrUrisWith2parts = Math.floor(rawUris.length / 2);
-      for (var i = 0; i < nbrUrisWith2parts; i++) {
-        var innerIdx = i * 2;
-        // sanitize the uri
-        result += $sce.getTrustedMediaUrl(trim(rawUris[innerIdx]));
-        // add the descriptor
-        result += ' ' + trim(rawUris[innerIdx + 1]);
+      function isSpaceCode(code) {
+        // HTML whitespace: space, tab, LF, FF, CR
+        return code === 32 || code === 9 || code === 10 || code === 12 || code === 13;
       }
 
-      // split the last item into uri and descriptor
-      var lastTuple = trim(rawUris[i * 2]).split(/\s/);
+      while (i < len) {
+        // Skip leading whitespace and extra commas between candidates
+        while (i < len) {
+          var c = s.charCodeAt(i);
+          if (c === 44 /* , */ || isSpaceCode(c)) {
+            i++;
+          } else {
+            break;
+          }
+        }
+        if (i >= len) break;
 
-      // sanitize the last uri
-      result += $sce.getTrustedMediaUrl(trim(lastTuple[0]));
+        // Read URL up to whitespace or comma
+        var urlStart = i;
+        while (i < len) {
+          c = s.charCodeAt(i);
+          if (c === 44 /* , */ || isSpaceCode(c)) break;
+          i++;
+        }
+        var url = trim(s.slice(urlStart, i));
+        if (!url) {
+          // Empty token (e.g., consecutive commas) — skip
+          continue;
+        }
 
-      // and add the last descriptor if any
-      if (lastTuple.length === 2) {
-        result += (' ' + trim(lastTuple[1]));
+        // Optional single descriptor token (e.g., "1x" or "200w"): read non-space, non-comma run
+        while (i < len && isSpaceCode(s.charCodeAt(i))) i++;
+        var descStart = i;
+        while (i < len) {
+          c = s.charCodeAt(i);
+          if (c === 44 /* , */ || isSpaceCode(c)) break;
+          i++;
+        }
+        var descriptor = s.slice(descStart, i);
+        // Consume trailing whitespace before the next comma (if any). The next loop iteration
+        // will skip the comma and further whitespace uniformly.
+        while (i < len && isSpaceCode(s.charCodeAt(i))) i++;
+
+        // Sanitize URL for MEDIA_URL context and rebuild the candidate
+        var sanitizedUrl = $sce.getTrustedMediaUrl(url);
+        var candidate = sanitizedUrl;
+        if (descriptor) candidate += ' ' + trim(descriptor);
+        parts.push(candidate);
       }
-      return result;
+
+      // Join with a canonical ", " separator between candidates
+      return parts.join(', ');
     }
 
 
